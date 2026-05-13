@@ -1,10 +1,14 @@
-# pip install datasets pandas numpy scikit-learn
+# pip install datasets pandas numpy scikit-learn requests transformers torch
+
 
 import random
 import numpy as np
 import pandas as pd
 from datasets import load_dataset
 from sklearn.model_selection import train_test_split
+import json
+import urllib.parse
+import urllib.request
 
 SEED = 42
 random.seed(SEED)
@@ -15,7 +19,7 @@ np.random.seed(SEED)
 # 1. Load Base Financial Language Dataset
 # ============================================================
 
-def load_financial_dataset(dataset_name="ChanceFocus/fiqa-sentiment-classification"):
+def load_financial_dataset(dataset_name="FinGPT/fingpt-sentiment-train"):
     """
     Example dataset: FiQA-style financial sentiment data.
     You can replace this with:
@@ -37,8 +41,42 @@ def load_financial_dataset(dataset_name="ChanceFocus/fiqa-sentiment-classificati
     return df
 
 
-df = load_financial_dataset()
+def load_fingpt_market_data_via_api(
+    symbol="AAPL",
+    interval="1d",
+    limit=30,
+    base_url="http://localhost:8000",
+    timeout=20,
+):
+    """
+    Direct API request path for FinGPT-served financial/market data.
+    Assumes you have a FinGPT-compatible service endpoint running.
+    """
+    url = f"{base_url.rstrip('/')}/market-data"
+    query = urllib.parse.urlencode({"symbol": symbol, "interval": interval, "limit": limit})
+    request_url = f"{url}?{query}"
+    with urllib.request.urlopen(request_url, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return pd.DataFrame(payload.get("data", payload))
 
+
+def query_fingpt_with_prompt(
+    prompt,
+    model_name="FinGPT/fingpt-forecaster_dow30_llama2-7b_lora",
+    max_new_tokens=128,
+):
+    """
+    Direct prompt path for FinGPT text generation/inference.
+    Uses Hugging Face transformers so you can issue prompts explicitly.
+    """
+    from transformers import pipeline
+
+    generator = pipeline("text-generation", model=model_name)
+    outputs = generator(prompt, max_new_tokens=max_new_tokens, do_sample=False)
+    return outputs[0]["generated_text"]
+
+
+df = load_financial_dataset()
 
 # ============================================================
 # 2. Normalize Dataset Columns
@@ -53,7 +91,10 @@ def normalize_finance_df(df):
     """
 
     # guess text column
-    possible_text_cols = ["text", "sentence", "headline", "content", "title", "query"]
+    possible_text_cols = [
+        "text", "sentence", "headline", "content", "title", "query",
+        "input", "instruction", "output"
+    ]
     text_col = None
 
     for c in possible_text_cols:
@@ -65,7 +106,7 @@ def normalize_finance_df(df):
         raise ValueError(f"No text column found. Columns are: {df.columns.tolist()}")
 
     # guess label column
-    possible_label_cols = ["label", "sentiment", "target"]
+    possible_label_cols = ["label", "sentiment", "target", "output"]
     label_col = None
 
     for c in possible_label_cols:
@@ -78,8 +119,16 @@ def normalize_finance_df(df):
         label_col = "label"
 
     out = pd.DataFrame()
-    out["text"] = df[text_col].astype(str)
-    out["label"] = df[label_col].astype(str)
+    # FinGPT instruction datasets often have `instruction`, `input`, `output`.
+    # Build richer text from instruction/input when available.
+    if "instruction" in df.columns and "input" in df.columns:
+        out["text"] = (
+            "Instruction: " + df["instruction"].astype(str) + "\n"
+            + "Input: " + df["input"].astype(str)
+        )
+    else:
+        out["text"] = df[text_col].astype(str)
+
 
     # If no timestamp exists, synthesize one
     if "date" in df.columns:
@@ -108,37 +157,93 @@ print(df.head())
 # ============================================================
 
 CLIENT_PERSONAS = {
-    "retail_etf": {
-        "keywords": ["ETF", "index", "retirement", "dividend", "portfolio", "fund"],
+    "retail_investors": {
+        "keywords": [
+            "ETF", "ETFs", "index fund", "retirement", "401k", "IRA",
+            "dividend", "income portfolio"
+        ],
         "region": "US",
         "timezone_group": "US",
     },
-    "crypto_trader": {
-        "keywords": ["crypto", "bitcoin", "ethereum", "token", "blockchain", "coin"],
+    "crypto_traders": {
+        "keywords": [
+            "gm", "wagmi", "ngmi", "alpha", "ape", "degen", "hodl",
+            "DeFi", "yield farming", "liquidity pool", "bridge",
+            "memecoin", "doge", "pepe", "token"
+        ],
         "region": "GLOBAL",
         "timezone_group": "GLOBAL",
     },
-    "eu_investor": {
-        "keywords": ["ECB", "euro", "Germany", "France", "EU", "Europe", "inflation"],
+    "institutional_analysts": {
+        "keywords": [
+            "earnings", "guidance", "SEC filing", "10-K", "10-Q",
+            "macro", "macroeconomics", "CPI", "PPI", "nonfarm payrolls",
+            "yield curve", "fed funds"
+        ],
+        "region": "US",
+        "timezone_group": "US",
+    },
+    "european_users": {
+        "keywords": [
+            "ECB", "European Central Bank", "EU regulation", "MiFID",
+            "ESMA", "GDPR", "DAX", "CAC 40", "Euro Stoxx", "European equities"
+        ],
         "region": "EU",
         "timezone_group": "EU",
     },
-    "asia_market": {
-        "keywords": ["China", "Japan", "Asia", "Nikkei", "Yuan", "Hong Kong"],
+    "asian_market_users": {
+        "keywords": [
+            "Nikkei", "TOPIX", "Hang Seng", "SSE Composite", "ASX 200",
+            "regional market", "ASEAN", "local company", "earnings in Japan",
+            "China stimulus", "KOSPI"
+        ],
         "region": "ASIA",
         "timezone_group": "ASIA",
     },
-    "macro_analyst": {
-        "keywords": ["rate", "inflation", "GDP", "central bank", "bond", "yield"],
-        "region": "GLOBAL",
-        "timezone_group": "GLOBAL",
-    },
-    "stock_picker": {
-        "keywords": ["earnings", "stock", "shares", "revenue", "profit", "valuation"],
-        "region": "US",
-        "timezone_group": "US",
-    },
 }
+
+# FinGPT repository sources used to bootstrap domain data collection by persona.
+# Repo root: https://github.com/ai4finance-foundation/fingpt
+PERSONA_DATA_SOURCES = {
+    "retail_investors": [
+        "https://raw.githubusercontent.com/ai4finance-foundation/fingpt/master/FinGPT_RAG/instruct-FinGPT/training_data/fingpt-financial-sentiment-train.csv",
+        "https://raw.githubusercontent.com/ai4finance-foundation/fingpt/master/FinGPT_Forecaster/data/demo/stock_news.csv",
+    ],
+    "crypto_traders": [
+        "https://raw.githubusercontent.com/ai4finance-foundation/fingpt/master/FinGPT_Forecaster/data/demo/crypto_news.csv",
+    ],
+    "institutional_analysts": [
+        "https://raw.githubusercontent.com/ai4finance-foundation/fingpt/master/FinGPT_RAG/multisource_retrieval/sec_filings.py",
+        "https://raw.githubusercontent.com/ai4finance-foundation/fingpt/master/FinGPT_RAG/multisource_retrieval/earning_calls.py",
+        "https://raw.githubusercontent.com/ai4finance-foundation/fingpt/master/FinGPT_RAG/multisource_retrieval/fred.py",
+    ],
+    "european_users": [
+        "https://raw.githubusercontent.com/ai4finance-foundation/fingpt/master/FinGPT_RAG/multisource_retrieval/finnhub_utils.py",
+    ],
+    "asian_market_users": [
+        "https://raw.githubusercontent.com/ai4finance-foundation/fingpt/master/FinGPT_Forecaster/data/demo/stock_news.csv",
+    ],
+}
+
+
+def load_persona_seed_data_from_fingpt(persona_name, timeout=20):
+    """
+    Pulls persona-aligned seed files directly from the FinGPT GitHub repository.
+    Returns a DataFrame with source_url and text columns.
+    """
+    rows = []
+    for url in PERSONA_DATA_SOURCES.get(persona_name, []):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                content = response.read().decode("utf-8", errors="ignore")
+            rows.append({"source_url": url, "text": content[:5000]})
+        except Exception as exc:
+            rows.append({"source_url": url, "text": f"ERROR_LOADING_SOURCE: {exc}"})
+
+    return pd.DataFrame(rows)
+
+
+
 
 
 def assign_persona(text):
@@ -344,12 +449,26 @@ def export_client_round_data(df, output_dir="financial_fl_data"):
     import os
     os.makedirs(output_dir, exist_ok=True)
 
+    # Handle possible column variants introduced by merges/transforms.
+    label_column = None
+    for candidate in ["label", "output", "label_x", "label_y"]:
+        if candidate in df.columns:
+            label_column = candidate
+            break
+    if label_column is None:
+        df = df.copy()
+        df["label"] = "unknown"
+        label_column = "label"
+
+
     for (round_id, client_id), sub in df.groupby(["round", "client_id"]):
         round_dir = os.path.join(output_dir, f"round_{round_id}")
         os.makedirs(round_dir, exist_ok=True)
 
         path = os.path.join(round_dir, f"{client_id}.csv")
-        sub[["text", "label", "timestamp", "persona", "region"]].to_csv(
+        export_sub = sub.copy()
+        export_sub["label"] = export_sub[label_column].astype(str)
+        export_sub[["text", "label", "timestamp", "persona", "region"]].to_csv(
             path,
             index=False
         )
