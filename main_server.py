@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 
 SEED = 42
+SYNTHETIC_TIME_WINDOW_DAYS = 30
 random.seed(SEED)
 np.random.seed(SEED)
 
@@ -136,8 +137,13 @@ def normalize_finance_df(df):
     elif "timestamp" in df.columns:
         out["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     else:
+        # FinGPT instruction datasets may not include explicit timestamps.
+        # Use a capped recent window so very large datasets do not back-shift
+        # synthetic time into distant years.
+        end_time = pd.Timestamp.utcnow().floor("H")
+        start_time = end_time - pd.Timedelta(days=SYNTHETIC_TIME_WINDOW_DAYS)
         out["timestamp"] = pd.date_range(
-            start="2020-01-01",
+            start=start_time,
             periods=len(out),
             freq="H"
         )
