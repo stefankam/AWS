@@ -22,6 +22,7 @@ def run_method(method: str, df: pd.DataFrame, availability: pd.DataFrame):
     return run_federated(method, model, tok, df, availability, config)
 
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--method", default="aws", choices=["aws", "random", "oracle", "no_availability", "centralized", "all"])
@@ -30,7 +31,24 @@ def main():
     md = config.OUTPUT_DIR / "metadata"
     full = pd.read_csv(md / "full_client_dataset.csv", parse_dates=["timestamp"])
     avail = pd.read_csv(md / "availability_matrix.csv")
-    merged = full.merge(avail[["client_id", "round_id", "available", "availability_probability"]], on=["client_id", "round_id"], how="left")
+    merged = full.merge(
+        avail[["client_id", "round_id", "available", "availability_probability"]],
+        on=["client_id", "round_id"],
+        how="left",
+        suffixes=("", "_avail"),
+    )
+
+    if "available" not in merged.columns:
+        if "available_avail" in merged.columns:
+            merged["available"] = merged["available_avail"]
+        elif "available_x" in merged.columns:
+            merged["available"] = merged["available_x"]
+        elif "available_y" in merged.columns:
+            merged["available"] = merged["available_y"]
+        else:
+            merged["available"] = 0
+    merged["available"] = merged["available"].fillna(0).astype(int)
+
     avail_persona = merged[["client_id", "round_id", "available", "persona", "region"]].drop_duplicates()
 
     methods = [args.method] if args.method != "all" else ["aws", "random", "oracle", "no_availability", "centralized"]
@@ -85,8 +103,9 @@ def main():
                 "fairness_index": fair["jain_fairness"],
             })
 
-    perp = pd.concat(all_pp, ignore_index=True) if all_pp else pd.DataFrame()
-    fairdf = pd.DataFrame(all_fair)
+    valid_pp = [df for df in all_pp if not df.empty and not df.isna().all(axis=None)]
+    perp = pd.concat(valid_pp, ignore_index=True) if valid_pp else pd.DataFrame(columns=["persona","region","perplexity","num_eval_samples","accuracy","method","round"])
+    fairdf = pd.DataFrame(all_fair)    
     lagdf = pd.DataFrame(lag_rows)
     suppressdf = pd.DataFrame(suppress, columns=["method", "persona", "region", "window_start", "window_end", "pre_window_metric", "during_window_metric", "post_window_metric", "recovery_rounds"])
     basedf = pd.DataFrame(baseline_rows)

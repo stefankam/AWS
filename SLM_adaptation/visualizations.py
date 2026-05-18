@@ -21,7 +21,9 @@ def plot_semantic_drift_timeline(lag_df, out):
     if len(lag_df):
         y=range(len(lag_df)); plt.scatter(lag_df.first_seen_round,y,label='first_seen'); plt.scatter(lag_df.threshold_round.fillna(-1),y,label='threshold');
         plt.yticks(list(y), lag_df.term)
-    plt.legend(); plt.title('Semantic drift timeline'); plt.xlabel('round'); _save(fig,out/'semantic_drift_timeline')
+    if len(lag_df):
+        plt.legend()
+    plt.title('Semantic drift timeline'); plt.xlabel('round'); _save(fig,out/'semantic_drift_timeline')
 
 def plot_per_persona_perplexity(pp, out):
     fig=plt.figure(figsize=(10,5));

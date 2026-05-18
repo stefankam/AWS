@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SEED = 42
-DATASET_NAME = "financial_phrasebank"
+DATASET_NAME = "fingpt_generate"
 NUM_CLIENTS = 35
 NUM_ROUNDS = 50
 OUTPUT_DIR = Path("financial_fl_data")
@@ -23,3 +23,7 @@ CHECKPOINT_DIR = Path("checkpoints")
 METRICS_DIR = Path("metrics")
 PLOTS_DIR = OUTPUT_DIR / "plots"
 CENTRAL_RETRAIN_EVERY = 5
+
+FINGPT_MODEL_NAME = "meta-llama/Meta-Llama-3-8B"
+FINGPT_SAMPLES_PER_TOPIC = 6
+FINGPT_ADAPTER_MODEL = "FinGPT/fingpt-mt_llama3-8b_lora"

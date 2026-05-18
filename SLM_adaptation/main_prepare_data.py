@@ -17,7 +17,13 @@ def main():
     out = Path(config.OUTPUT_DIR); md = out / "metadata"; pl = out / "plots"
     md.mkdir(parents=True, exist_ok=True); pl.mkdir(parents=True, exist_ok=True)
 
-    df = load_financial_dataset(config.DATASET_NAME)
+    df = load_financial_dataset(
+        config.DATASET_NAME,
+        model_name=config.FINGPT_MODEL_NAME,
+        samples_per_topic=config.FINGPT_SAMPLES_PER_TOPIC,
+        adapter_model=config.FINGPT_ADAPTER_MODEL,
+    )
+
     df = normalize_finance_df(df)
     df_clients, client_metadata = create_clients(df, num_clients=config.NUM_CLIENTS, seed=config.SEED)
     df_clients = add_temporal_rounds(df_clients, num_rounds=config.NUM_ROUNDS)
