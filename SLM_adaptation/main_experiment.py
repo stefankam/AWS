@@ -4,7 +4,7 @@ import pandas as pd
 import config
 from models import build_model_and_tokenizer
 from federated_train import run_federated
-from baselines import central_llm_guidance_baseline
+from baselines import crosslm_teacher_student_baseline
 from evaluation import evaluate_perplexity_by_persona, evaluate_sentiment_accuracy_by_persona, summarize_fairness
 from metrics import detect_emerging_terms
 import visualizations as vz
@@ -12,20 +12,22 @@ import visualizations as vz
 
 def run_method(method: str, df: pd.DataFrame, availability: pd.DataFrame):
     model, tok = build_model_and_tokenizer(config.MODEL_NAME, config.USE_LORA)
-    if method == "centralized":
+    if method in {"centralized", "crosslm"}:
         rows = []
+        # LLM-curated corpus proxy: global text/label pool without client/persona metadata.
+        llm_corpus = df[["text", "label"]].drop_duplicates().copy()
         for r in range(config.NUM_ROUNDS):
-            vis = df[df.round_id <= r].copy()
-            model = central_llm_guidance_baseline(model, tok, vis, config.CENTRAL_RETRAIN_EVERY, r, config)
-            rows.append({"method": "centralized", "round": r, "selected": -1})
-        return model, pd.DataFrame(rows), pd.DataFrame(columns=["method", "round", "selected_clients"])
-    return run_federated(method, model, tok, df, availability, config)
+            model = crosslm_teacher_student_baseline(model, tok, llm_corpus, r, config)
+            rows.append({"method": method, "round": r, "selected": -1})
+        return model, tok, pd.DataFrame(rows), pd.DataFrame(columns=["method", "round", "selected_clients"])
 
+    model, mdf, sdf = run_federated(method, model, tok, df, availability, config)
+    return model, tok, mdf, sdf
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--method", default="aws", choices=["aws", "random", "oracle", "no_availability", "centralized", "all"])
+    ap.add_argument("--method", default="aws", choices=["aws", "random", "oracle", "no_availability", "centralized", "crosslm", "all"])
     args = ap.parse_args()
 
     md = config.OUTPUT_DIR / "metadata"
@@ -51,7 +53,7 @@ def main():
 
     avail_persona = merged[["client_id", "round_id", "available", "persona", "region"]].drop_duplicates()
 
-    methods = [args.method] if args.method != "all" else ["aws", "random", "oracle", "no_availability", "centralized"]
+    methods = [args.method] if args.method != "all" else ["aws", "random", "oracle", "no_availability", "crosslm"]
     config.METRICS_DIR.mkdir(exist_ok=True, parents=True)
     config.CHECKPOINT_DIR.mkdir(exist_ok=True, parents=True)
     config.PLOTS_DIR.mkdir(exist_ok=True, parents=True)
@@ -59,7 +61,7 @@ def main():
     all_fair, all_pp, lag_rows, suppress, baseline_rows = [], [], [], [], []
 
     for m in methods:
-        model, mdf, sdf = run_method(m, merged, avail)
+        model, tok, mdf, sdf = run_method(m, merged, avail)
         mdf.to_csv(config.METRICS_DIR / f"round_metrics_{m}.csv", index=False)
         sdf.to_csv(config.METRICS_DIR / f"selected_clients_{m}.csv", index=False)
         (config.CHECKPOINT_DIR / m).mkdir(parents=True, exist_ok=True)
@@ -68,8 +70,8 @@ def main():
         adaptation_history = []
         for r in range(config.NUM_ROUNDS):
             ev = merged[merged.round_id == r]
-            pp = evaluate_perplexity_by_persona(ev)
-            acc = evaluate_sentiment_accuracy_by_persona(ev)
+            pp = evaluate_perplexity_by_persona(model, tok, ev, max_seq_length=config.MAX_SEQ_LENGTH)
+            acc = evaluate_sentiment_accuracy_by_persona(model, tok, ev, max_seq_length=config.MAX_SEQ_LENGTH)
             pp = pp.merge(acc, on="persona", how="left")
             pp["method"] = m
             pp["round"] = r
@@ -95,7 +97,7 @@ def main():
 
             global_ppl = float((pp["perplexity"] * pp["num_eval_samples"]).sum() / max(pp["num_eval_samples"].sum(), 1)) if len(pp) else float("nan")
             baseline_rows.append({
-                "method": "crosslm_proxy" if m == "centralized" else "collaborative_federated",
+                "method": "crosslm" if m in {"crosslm", "centralized"} else "collaborative_federated",
                 "round": r,
                 "global_perplexity": global_ppl,
                 "worst_persona_perplexity": fair["worst_persona_perplexity"],
