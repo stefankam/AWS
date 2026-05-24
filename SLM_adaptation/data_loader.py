@@ -3,24 +3,45 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Optional
+import os
+import re
 
 import pandas as pd
+
+
+def _build_generator(model_name: str, adapter_model: str | None):
+    """Create a text-generation pipeline, optionally loading a LoRA adapter."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    if adapter_model:
+        import importlib.util
+
+        if importlib.util.find_spec("peft") is None:
+            raise RuntimeError(
+                "adapter_model was provided but `peft` is not installed. "
+                "Install with `pip install peft` to load FinGPT adapters."
+            )
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, adapter_model)
+
+    return pipeline("text-generation", model=model, tokenizer=tokenizer)
+
+
 
 
 def query_fingpt_with_prompt(
     prompt: str,
     model_name: str,
+    adapter_model: str | None = None,
     max_new_tokens: int = 128,
 ) -> str:
-    """Generate financial text via HF text-generation.
-
-    model_name must be provided by config (no hardcoded distilgpt2 default).
-    """
-
-    from transformers import pipeline
-
+    """Generate financial text via HF text-generation + optional FinGPT adapter."""
     try:
-        generator = pipeline("text-generation", model=model_name)
+        generator = _build_generator(model_name=model_name, adapter_model=adapter_model)
     except OSError as exc:
         raise RuntimeError(
             f"Unable to initialize generation model '{model_name}'. "
@@ -31,6 +52,58 @@ def query_fingpt_with_prompt(
     return outputs[0]["generated_text"]
 
 
+def _extract_fingpt_answer(raw_output: str) -> str:
+    """Strip instruction preamble from FinGPT forecaster output."""
+    return re.sub(r".*\[/INST\]\s*", "", raw_output, flags=re.DOTALL).strip()
+
+
+def generate_forecaster_note(
+    ticker: str,
+    curday: str,
+    n_weeks: int,
+    base_model_name: str,
+    adapter_model: str,
+) -> tuple[str, str]:
+    """Run FinGPT Forecaster flow: retrieve data via construct_prompt, then generate."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+
+    # Requires FinGPT repo forecaster module in PYTHONPATH.
+    from app import construct_prompt
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        token=True,
+        trust_remote_code=True,
+        device_map="auto",
+        torch_dtype=torch.float16,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name, token=True)
+    model = PeftModel.from_pretrained(base_model, adapter_model)
+    model.eval()
+
+    info, prompt = construct_prompt(
+        ticker=ticker,
+        curday=curday,
+        n_weeks=n_weeks,
+        use_basics=False,
+        use_market_sentiment=False,
+    )
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_length=4096,
+            do_sample=True,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=True,
+        )
+
+    output = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    return info, _extract_fingpt_answer(output)
+
 
 def load_financial_dataset(
     dataset_name: str = "fingpt_generate",
@@ -38,37 +111,78 @@ def load_financial_dataset(
     adapter_model: str | None = None,
     samples_per_topic: int = 6,
 ) -> pd.DataFrame:
-    """Build a dynamic df by prompting a generation model for finance text."""
-    del dataset_name, adapter_model  # adapter tracked in config for experiment side
-    topics = [
-        "ETF approval and market reaction",
-        "rate hikes and bond-equity rotation",
-        "AI infrastructure earnings momentum",
-        "MiCA regulation and EU crypto compliance",
-        "central bank events and FX volatility",
-        "small-cap emerging companies outlook",
-    ]
+    """Build a dynamic df using FinGPT Forecaster retrieval+generation when configured."""
+    del dataset_name
+
+    use_forecaster = os.getenv("FINGPT_USE_FORECASTER", "0").lower() in {"1", "true", "yes"}
+
+
 
     rows = []
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    for ti, topic in enumerate(topics):
-        for si in range(samples_per_topic):
-            prompt = (
-                "Write a concise financial assistant note (3-5 sentences) "
-                f"about: {topic}. End with one token in brackets: [positive], [neutral], or [negative]."
+
+
+    if use_forecaster:
+        tickers = [t.strip().upper() for t in os.getenv("FINGPT_TICKERS", "AAPL,MSFT,NVDA,TSLA,AMZN,GOOGL").split(",") if t.strip()]
+        curday = os.getenv("FINGPT_CURDAY", now.strftime("%Y-%m-%d"))
+        n_weeks = int(os.getenv("FINGPT_N_WEEKS", "3"))
+        forecaster_base = os.getenv("FINGPT_FORECASTER_BASE", "meta-llama/Llama-2-7b-chat-hf")
+        forecaster_lora = adapter_model or os.getenv("FINGPT_FORECASTER_LORA", "FinGPT/fingpt-forecaster_dow30_llama2-7b_lora")
+
+        for ti, ticker in enumerate(tickers):
+            info, note = generate_forecaster_note(
+                ticker=ticker,
+                curday=curday,
+                n_weeks=n_weeks,
+                base_model_name=forecaster_base,
+                adapter_model=forecaster_lora,
             )
-            text = query_fingpt_with_prompt(prompt, model_name=model_name, max_new_tokens=180)
-            low = text.lower()
-            label = "positive" if "[positive]" in low else "negative" if "[negative]" in low else "neutral"
+            low = note.lower()
+            label = "positive" if "positive" in low else "negative" if "negative" in low else "neutral"
             rows.append({
-                "text": text,
+                "text": note,
                 "label": label,
-                "timestamp": now - pd.Timedelta(hours=(ti * samples_per_topic + si)),
-                "topic": topic,
+                "timestamp": now - pd.Timedelta(hours=ti),
+                "topic": f"{ticker} forecast",
+                "seed_info": str(info)[:3000],
             })
+    else:
+        topics = [
+            "ETF approval and market reaction",
+            "rate hikes and bond-equity rotation",
+            "AI infrastructure earnings momentum",
+            "MiCA regulation and EU crypto compliance",
+            "central bank events and FX volatility",
+            "small-cap emerging companies outlook",
+        ]
+        for ti, topic in enumerate(topics):
+            for si in range(samples_per_topic):
+                prompt = (
+                    "Given this recent market seed text, write a concise financial assistant note (3-5 sentences). "
+                    "Stay factual, include one potential market implication, and end with exactly one label token: "
+                    "[positive], [neutral], or [negative].\n\n"
+                    f"Seed: {topic}"
+                )
+                text = query_fingpt_with_prompt(
+                    prompt,
+                    model_name=model_name,
+                    adapter_model=adapter_model,
+                    max_new_tokens=180,
+                )
+                low = text.lower()
+                label = "positive" if "[positive]" in low else "negative" if "[negative]" in low else "neutral"
+                rows.append({
+                    "text": text,
+                    "label": label,
+                    "timestamp": now - pd.Timedelta(hours=(ti * samples_per_topic + si)),
+                    "topic": topic,
+                })
 
     df = pd.DataFrame(rows)
-    print(f"[data_loader] Generated {len(df)} rows using model '{model_name}'.")
+    print(
+        f"[data_loader] Generated {len(df)} rows using base model '{model_name}' and adapter '{adapter_model or 'none'}'. "
+        f"Forecaster retrieval path: {'enabled' if use_forecaster else 'disabled'}."
+    )
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
