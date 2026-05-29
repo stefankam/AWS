@@ -2,7 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 import random
 import numpy as np
-
+import os
 import config
 from data_loader import load_financial_dataset, normalize_finance_df
 from client_personas import create_clients
@@ -16,6 +16,10 @@ def main():
     random.seed(config.SEED); np.random.seed(config.SEED)
     out = Path(config.OUTPUT_DIR); md = out / "metadata"; pl = out / "plots"
     md.mkdir(parents=True, exist_ok=True); pl.mkdir(parents=True, exist_ok=True)
+
+    os.environ.setdefault("FINGPT_DAYS", str(getattr(config, "FINGPT_DAYS", 30)))
+    if hasattr(config, "FINGPT_TOPICS") and config.FINGPT_TOPICS:
+        os.environ.setdefault("FINGPT_TOPICS", "||".join(config.FINGPT_TOPICS))
 
     df = load_financial_dataset(
         config.DATASET_NAME,

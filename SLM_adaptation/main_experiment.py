@@ -82,23 +82,30 @@ def main():
             all_fair.append(fair)
 
             terms = detect_emerging_terms(merged, list(range(r)), r)
-            if terms:
-                adaptation_history.append(1.0)
             for t in terms[:5]:
+                lag = 1 if r + 1 < config.NUM_ROUNDS else None
+                if lag is not None:
+                    adaptation_history.append(lag)
                 lag_rows.append({
                     "method": m,
                     "term": t,
                     "first_seen_round": r,
                     "threshold_round": r + 1 if r + 1 < config.NUM_ROUNDS else None,
-                    "adaptation_lag": 1 if r + 1 < config.NUM_ROUNDS else None,
+                    "adaptation_lag": lag,
                     "persona": "mixed",
                     "region": "GLOBAL",
                 })
 
             global_ppl = float((pp["perplexity"] * pp["num_eval_samples"]).sum() / max(pp["num_eval_samples"].sum(), 1)) if len(pp) else float("nan")
+            selected_row = mdf[mdf["round"] == r]
+            selected_clients = int(selected_row["selected"].iloc[0]) if not selected_row.empty and "selected" in selected_row else 0
             baseline_rows.append({
-                "method": "crosslm" if m in {"crosslm", "centralized"} else "collaborative_federated",
+                "method": m,
+                "method_family": "crosslm_teacher_student" if m in {"crosslm", "centralized"} else "federated",
                 "round": r,
+                "selected_clients": selected_clients,
+                "num_eval_samples": int(pp["num_eval_samples"].sum()) if len(pp) else 0,
+                "emerging_terms_count": len(terms),
                 "global_perplexity": global_ppl,
                 "worst_persona_perplexity": fair["worst_persona_perplexity"],
                 "adaptation_lag_mean": float(sum(adaptation_history) / len(adaptation_history)) if adaptation_history else float("nan"),
@@ -126,7 +133,7 @@ def main():
     vz.plot_fairness_index(fairdf, config.PLOTS_DIR)
     vz.plot_adaptation_lag_by_method(lagdf, config.PLOTS_DIR)
     vz.plot_semantic_suppression_recovery(suppressdf, config.PLOTS_DIR)
-
+    vz.plot_all_experiment_summaries(basedf, fairdf, perp, lagdf, config.PLOTS_DIR)
 
 if __name__ == "__main__":
     main()

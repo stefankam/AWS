@@ -48,8 +48,24 @@ def query_fingpt_with_prompt(
             "If this is gated/private, run `hf auth login` and ensure access is granted."
         ) from exc
 
-    outputs = generator(prompt, max_new_tokens=max_new_tokens, do_sample=False)
-    return outputs[0]["generated_text"]
+    outputs = generator(
+        prompt,
+        max_new_tokens=max_new_tokens,
+        do_sample=True,
+        temperature=0.7,
+        top_p=0.9,
+        return_full_text=False,
+    )
+    raw = str(outputs[0].get("generated_text", "")).strip()
+    if raw:
+        return raw
+
+    # Fallback if backend ignores return_full_text=False.
+    outputs = generator(prompt, max_new_tokens=max_new_tokens, do_sample=True, temperature=0.7, top_p=0.9)
+    raw = str(outputs[0].get("generated_text", "")).strip()
+    cleaned = raw[len(prompt):].strip() if raw.startswith(prompt) else raw.strip()
+    return cleaned if cleaned else "Market signals are mixed and near-term direction remains uncertain. [neutral]"
+
 
 
 def _extract_fingpt_answer(raw_output: str) -> str:
@@ -117,6 +133,7 @@ def load_financial_dataset(
     use_forecaster = os.getenv("FINGPT_USE_FORECASTER", "0").lower() in {"1", "true", "yes"}
 
 
+    days = int(os.getenv("FINGPT_DAYS", "30"))
 
     rows = []
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -129,25 +146,31 @@ def load_financial_dataset(
         forecaster_base = os.getenv("FINGPT_FORECASTER_BASE", "meta-llama/Llama-2-7b-chat-hf")
         forecaster_lora = adapter_model or os.getenv("FINGPT_FORECASTER_LORA", "FinGPT/fingpt-forecaster_dow30_llama2-7b_lora")
 
-        for ti, ticker in enumerate(tickers):
-            info, note = generate_forecaster_note(
-                ticker=ticker,
-                curday=curday,
-                n_weeks=n_weeks,
-                base_model_name=forecaster_base,
-                adapter_model=forecaster_lora,
-            )
-            low = note.lower()
-            label = "positive" if "positive" in low else "negative" if "negative" in low else "neutral"
-            rows.append({
-                "text": note,
-                "label": label,
-                "timestamp": now - pd.Timedelta(hours=ti),
-                "topic": f"{ticker} forecast",
-                "seed_info": str(info)[:3000],
-            })
+        for day_offset in range(days):
+            day = (now - pd.Timedelta(days=day_offset)).strftime("%Y-%m-%d")
+            for ti, ticker in enumerate(tickers):
+                info, note = generate_forecaster_note(
+                    ticker=ticker,
+                    curday=day if day else curday,
+                    n_weeks=n_weeks,
+                    base_model_name=forecaster_base,
+                    adapter_model=forecaster_lora,
+                )
+                low = note.lower()
+                label = "positive" if "positive" in low else "negative" if "negative" in low else "neutral"
+                rows.append({
+                    "prompt": f"Forecaster weekly note for {ticker} on {day}",
+                    "text": note,
+                    "label": label,
+                    "timestamp": now - pd.Timedelta(hours=(day_offset * max(1, len(tickers)) + ti)),
+                    "topic": f"{ticker} forecast",
+                    "seed_info": str(info)[:3000],
+                })
+
+
     else:
-        topics = [
+        topics_env = os.getenv("FINGPT_TOPICS", "")
+        topics = [t.strip() for t in topics_env.split("||") if t.strip()] if topics_env else [
             "ETF approval and market reaction",
             "rate hikes and bond-equity rotation",
             "AI infrastructure earnings momentum",
@@ -155,28 +178,34 @@ def load_financial_dataset(
             "central bank events and FX volatility",
             "small-cap emerging companies outlook",
         ]
-        for ti, topic in enumerate(topics):
-            for si in range(samples_per_topic):
-                prompt = (
-                    "Given this recent market seed text, write a concise financial assistant note (3-5 sentences). "
-                    "Stay factual, include one potential market implication, and end with exactly one label token: "
-                    "[positive], [neutral], or [negative].\n\n"
-                    f"Seed: {topic}"
-                )
-                text = query_fingpt_with_prompt(
-                    prompt,
-                    model_name=model_name,
-                    adapter_model=adapter_model,
-                    max_new_tokens=180,
-                )
-                low = text.lower()
-                label = "positive" if "[positive]" in low else "negative" if "[negative]" in low else "neutral"
-                rows.append({
-                    "text": text,
-                    "label": label,
-                    "timestamp": now - pd.Timedelta(hours=(ti * samples_per_topic + si)),
-                    "topic": topic,
-                })
+
+
+        for day_offset in range(days):
+            day = (now - pd.Timedelta(days=day_offset)).strftime("%Y-%m-%d")
+            for ti, topic in enumerate(topics):
+                for si in range(samples_per_topic):
+                    prompt = (
+                        "Given this recent market seed text, write a concise financial assistant note (3-5 sentences). "
+                        "Stay factual, include one potential market implication, and end with exactly one label token: "
+                        "[positive], [neutral], or [negative].\n\n"
+                        f"Date: {day}\n"
+                        f"Seed: {topic}"
+                    )
+                    text = query_fingpt_with_prompt(
+                        prompt,
+                        model_name=model_name,
+                        adapter_model=adapter_model,
+                        max_new_tokens=180,
+                    )
+                    low = text.lower()
+                    label = "positive" if "[positive]" in low else "negative" if "[negative]" in low else "neutral"
+                    rows.append({
+                        "prompt": prompt,
+                        "text": text,
+                        "label": label,
+                        "timestamp": now - pd.Timedelta(hours=(day_offset * len(topics) * samples_per_topic + ti * samples_per_topic + si)),
+                        "topic": topic,
+                    })
 
     df = pd.DataFrame(rows)
     print(
@@ -196,10 +225,13 @@ def _first_existing(df: pd.DataFrame, cols: list[str]) -> Optional[str]:
 def normalize_finance_df(df: pd.DataFrame) -> pd.DataFrame:
     text_col = _first_existing(df, ["text", "sentence", "headline", "content", "title", "query", "input", "instruction", "output"])
     out = pd.DataFrame()
-    if "instruction" in df.columns and "input" in df.columns:
-        out["text"] = "Instruction: " + df["instruction"].astype(str) + "\nInput: " + df["input"].astype(str)
-    elif text_col is not None:
+
+    out["prompt"] = df["prompt"].astype(str) if "prompt" in df.columns else ""
+
+    if text_col is not None:
         out["text"] = df[text_col].astype(str)
+    elif "instruction" in df.columns and "input" in df.columns:
+        out["text"] = (df["instruction"].astype(str) + "\n" + df["input"].astype(str)).str.strip()
     else:
         out["text"] = df.astype(str).agg(" | ".join, axis=1)
 
