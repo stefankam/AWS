@@ -52,9 +52,18 @@ def detect_suppression_windows(availability_df, persona, min_absent_rounds):
     return windows
 
 def measure_suppression_effect(metric_history, persona, window_start, window_end):
-    d=metric_history[metric_history.persona==persona]
-    pre=d[d.round<window_start]["perplexity"].mean(); mid=d[(d.round>=window_start)&(d.round<=window_end)]["perplexity"].mean(); post=d[d.round>window_end]["perplexity"].mean()
-    rec = int((d[d.round>window_end]["perplexity"].cummin().idxmin()-window_end)) if len(d[d.round>window_end]) else np.nan
-    return pre,mid,post,rec
+    d = metric_history[metric_history.persona == persona].sort_values("round")
+    pre = d[d["round"] < window_start]["perplexity"].mean()
+    mid = d[(d["round"] >= window_start) & (d["round"] <= window_end)]["perplexity"].mean()
+    post_df = d[d["round"] > window_end]
+    post = post_df["perplexity"].mean()
+
+    if post_df.empty or np.isnan(pre):
+        rec = np.nan
+    else:
+        recovered = post_df[post_df["perplexity"] <= pre]
+        rec = int(recovered["round"].iloc[0] - window_end) if len(recovered) else np.nan
+    return pre, mid, post, rec
+
 
 def compare_recovery_after_suppression(methods): return pd.DataFrame(methods)

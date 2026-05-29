@@ -30,7 +30,12 @@ def main():
 
     df = normalize_finance_df(df)
     df_clients, client_metadata = create_clients(df, num_clients=config.NUM_CLIENTS, seed=config.SEED)
-    df_clients = add_temporal_rounds(df_clients, num_rounds=config.NUM_ROUNDS)
+    df_clients = add_temporal_rounds(
+        df_clients,
+        num_rounds=config.NUM_ROUNDS,
+        semantic_drift_concepts=getattr(config, "SEMANTIC_DRIFT_CONCEPTS", None),
+    )
+
     availability_df = create_availability_matrix(client_metadata, num_rounds=config.NUM_ROUNDS, seed=config.SEED)
     available_df, unavailable_df = create_available_training_stream(df_clients, availability_df)
 
@@ -39,6 +44,9 @@ def main():
     full = df_clients.merge(availability_df[["client_id", "round_id", "available", "availability_probability"]], on=["client_id", "round_id"], how="left")
     client_metadata.to_csv(md / "client_metadata.csv", index=False)
     availability_df.to_csv(md / "availability_matrix.csv", index=False)
+
+    if "drift_concept" in full.columns:
+        full[full["drift_concept"].astype(str) != ""][["drift_concept", "drift_first_round"]].drop_duplicates().to_csv(md / "semantic_drift_manifest.csv", index=False)
     full.to_csv(md / "full_client_dataset.csv", index=False)
     available_df.to_csv(md / "available_train_dataset.csv", index=False)
     unavailable_df.to_csv(md / "unavailable_train_dataset.csv", index=False)
