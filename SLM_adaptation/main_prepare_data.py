@@ -17,6 +17,7 @@ def main():
     out = Path(config.OUTPUT_DIR); md = out / "metadata"; pl = out / "plots"
     md.mkdir(parents=True, exist_ok=True); pl.mkdir(parents=True, exist_ok=True)
 
+    os.environ.setdefault("FINGPT_USE_FORECASTER", "1" if getattr(config, "FINGPT_USE_FORECASTER", False) else "0")
     os.environ.setdefault("FINGPT_DAYS", str(getattr(config, "FINGPT_DAYS", 30)))
     if hasattr(config, "FINGPT_TOPICS") and config.FINGPT_TOPICS:
         os.environ.setdefault("FINGPT_TOPICS", "||".join(config.FINGPT_TOPICS))

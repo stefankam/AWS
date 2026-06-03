@@ -36,8 +36,10 @@ CROSSLM_MAX_GUIDANCE_SAMPLES_PER_ROUND = 256
 FINGPT_MODEL_NAME = "meta-llama/Meta-Llama-3-8B"
 FINGPT_SAMPLES_PER_TOPIC = 6
 FINGPT_ADAPTER_MODEL = "FinGPT/fingpt-mt_llama3-8b_lora"
-
-
+FINGPT_USE_FORECASTER = False
+FINGPT_FORECASTER_BASE = "meta-llama/Meta-Llama-3-8B-Instruct"
+FINGPT_FORECASTER_LORA = "FinGPT/fingpt-mt_llama3-8b_lora"
+FINGPT_FORECASTER_DIR = "/home/skb67/Projects/AWS/FinGPT/fingpt/FinGPT_Forecaster"
 
 
 FINGPT_DAYS = 30
