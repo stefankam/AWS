@@ -23,6 +23,38 @@ def _log(message: str) -> None:
         print(f"[data_loader] {message}", flush=True)
 
 
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", str(text)))
+
+
+def _is_underlength_generation(text: str, min_words: int) -> bool:
+    stripped = str(text).strip()
+    if not stripped:
+        return True
+    return _word_count(stripped) < min_words
+
+
+def _fallback_financial_note(seed: str, label: str = "neutral") -> str:
+    label = label if label in {"positive", "neutral", "negative"} else "neutral"
+    return (
+        f"Recent discussion around {seed} remains mixed, with investors weighing fresh catalysts against broader macro and liquidity risks. "
+        "A factual read is that near-term positioning may stay selective until stronger volume, earnings, or policy signals confirm the trend. "
+        "One potential market implication is higher dispersion across related assets as traders separate durable fundamentals from short-lived headlines. "
+        f"[{label}]"
+    )
+
+
+def _generation_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+@lru_cache(maxsize=4)
+
+
+
 @lru_cache(maxsize=4)
 
 
@@ -64,7 +96,9 @@ def query_fingpt_with_prompt(
     prompt: str,
     model_name: str,
     adapter_model: str | None = None,
-    max_new_tokens: int = 4096,
+    max_new_tokens: int | None = None,
+    min_words: int | None = None,
+    retries: int | None = None,
 ) -> str:
     """Generate financial text via HF text-generation + optional FinGPT adapter."""
     try:
@@ -76,21 +110,47 @@ def query_fingpt_with_prompt(
         ) from exc
 
 
-    # Put the token budget on the cached model config so pipeline does not mix
-    # generation_config with per-call generation kwargs. Clear max_length to
-    # avoid the max_new_tokens/max_length precedence warning from adapter configs.
-    generator.model.generation_config.max_new_tokens = max_new_tokens
-    generator.model.generation_config.max_length = None
-    outputs = generator(prompt, return_full_text=False, clean_up_tokenization_spaces=False)
-    raw = str(outputs[0].get("generated_text", "")).strip()
-    if raw:
-        return raw
+    token_budget = max_new_tokens if max_new_tokens is not None else _generation_int("FINGPT_MAX_NEW_TOKENS", 4096)
+    required_words = min_words if min_words is not None else _generation_int("FINGPT_MIN_WORDS", 35)
+    attempts = retries if retries is not None else _generation_int("FINGPT_GENERATION_RETRIES", 2)
 
-    # Fallback if backend ignores return_full_text=False.
-    outputs = generator(prompt, return_full_text=True, clean_up_tokenization_spaces=False)
-    raw = str(outputs[0].get("generated_text", "")).strip()
-    cleaned = raw[len(prompt):].strip() if raw.startswith(prompt) else raw.strip()
-    return cleaned if cleaned else "Market signals are mixed and near-term direction remains uncertain. [neutral]"
+    # Put generation constraints on the cached model config so pipeline does not
+    # mix generation_config with per-call generation kwargs. Clear max_length to
+    # avoid the max_new_tokens/max_length precedence warning from adapter configs.
+    generator.model.generation_config.max_new_tokens = token_budget
+    generator.model.generation_config.min_new_tokens = min(_generation_int("FINGPT_MIN_NEW_TOKENS", 96), token_budget)
+    generator.model.generation_config.max_length = None
+
+    best = ""
+    generation_prompt = prompt
+    for attempt in range(max(1, attempts + 1)):
+        outputs = generator(generation_prompt, return_full_text=False, clean_up_tokenization_spaces=False)
+        raw = str(outputs[0].get("generated_text", "")).strip()
+        if not raw:
+            # Fallback if backend ignores return_full_text=False.
+            outputs = generator(generation_prompt, return_full_text=True, clean_up_tokenization_spaces=False)
+            raw = str(outputs[0].get("generated_text", "")).strip()
+            raw = raw[len(generation_prompt):].strip() if raw.startswith(generation_prompt) else raw.strip()
+
+        if _word_count(raw) > _word_count(best):
+            best = raw
+        if not _is_underlength_generation(raw, required_words):
+            return raw
+
+        _log(
+            f"Underlength generation attempt {attempt + 1}/{attempts + 1}: "
+            f"{_word_count(raw)} words; retrying with stricter length instruction."
+        )
+        generation_prompt = (
+            f"{prompt}\n\nImportant: write the full 3-5 sentence note now. "
+            f"Do not answer with a fragment; use at least {required_words} words before the final label token."
+        )
+
+    if best.strip():
+        seed = prompt.split("Seed:")[-1].strip().splitlines()[0] if "Seed:" in prompt else "the market seed"
+        _log(f"Replacing underlength generation ({_word_count(best)} words) with deterministic fallback note.")
+        return _fallback_financial_note(seed)
+    return _fallback_financial_note("the market seed")
 
 
 def _extract_fingpt_answer(raw_output: str) -> str:
@@ -177,9 +237,11 @@ def generate_forecaster_note(
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
+        max_new_tokens = _generation_int("FINGPT_MAX_NEW_TOKENS", 4096)
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=4096,
+            max_new_tokens=max_new_tokens,
+            min_new_tokens=min(_generation_int("FINGPT_MIN_NEW_TOKENS", 96), max_new_tokens),
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
@@ -190,7 +252,6 @@ def generate_forecaster_note(
 
     output = tokenizer.decode(output_ids[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)
     return info, _extract_fingpt_answer(output)
-
 
 
 def load_financial_dataset(

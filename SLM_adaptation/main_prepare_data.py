@@ -12,15 +12,25 @@ from export_data import create_available_training_stream, export_client_round_da
 from diagnostics import diagnostics, plot_availability_heatmap, plot_available_clients_per_round, plot_persona_distribution
 
 
-def main():
+def main(verbose: bool = False):
+    if verbose:
+        os.environ["FINGPT_VERBOSE"] = "1"
     random.seed(config.SEED); np.random.seed(config.SEED)
     out = Path(config.OUTPUT_DIR); md = out / "metadata"; pl = out / "plots"
     md.mkdir(parents=True, exist_ok=True); pl.mkdir(parents=True, exist_ok=True)
 
     os.environ.setdefault("FINGPT_USE_FORECASTER", "1" if getattr(config, "FINGPT_USE_FORECASTER", False) else "0")
     os.environ.setdefault("FINGPT_DAYS", str(getattr(config, "FINGPT_DAYS", 30)))
+    os.environ.setdefault("FINGPT_MAX_NEW_TOKENS", str(getattr(config, "FINGPT_MAX_NEW_TOKENS", 4096)))
+    os.environ.setdefault("FINGPT_MIN_NEW_TOKENS", str(getattr(config, "FINGPT_MIN_NEW_TOKENS", 96)))
+    os.environ.setdefault("FINGPT_MIN_WORDS", str(getattr(config, "FINGPT_MIN_WORDS", 35)))
+    os.environ.setdefault("FINGPT_GENERATION_RETRIES", str(getattr(config, "FINGPT_GENERATION_RETRIES", 2)))
+    os.environ.setdefault("FINGPT_FORECASTER_BASE", getattr(config, "FINGPT_FORECASTER_BASE", "meta-llama/Llama-2-7b-chat-hf"))
+    os.environ.setdefault("FINGPT_FORECASTER_LORA", getattr(config, "FINGPT_FORECASTER_LORA", "FinGPT/fingpt-forecaster_dow30_llama2-7b_lora"))
+    os.environ.setdefault("FINGPT_FORECASTER_DIR", getattr(config, "FINGPT_FORECASTER_DIR", ""))
     if hasattr(config, "FINGPT_TOPICS") and config.FINGPT_TOPICS:
         os.environ.setdefault("FINGPT_TOPICS", "||".join(config.FINGPT_TOPICS))
+
 
     df = load_financial_dataset(
         config.DATASET_NAME,
