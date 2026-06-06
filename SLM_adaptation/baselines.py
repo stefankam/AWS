@@ -25,20 +25,52 @@ def _max_guidance_samples(cfg) -> int | None:
     return int(value) if value is not None else None
 
 
-def build_crosslm_guidance_batch(llm_curated_df: pd.DataFrame, round_id: int, cfg) -> pd.DataFrame:
-    """Build one periodic LLM-teacher guidance batch for the student SLM.
 
-    The batch intentionally excludes local-only fields such as client, persona,
-    region, and availability. If a public/LLM corpus carries ``round_id``, the
-    teacher exposes only samples available up to the current guidance round.
+
+def build_static_crosslm_prior_corpus(cfg) -> pd.DataFrame:
+    """Create a stale, non-local LLM prior corpus for CrossLM guidance.
+
+    This corpus intentionally does not read from ``full_client_dataset.csv`` or
+    any round-specific/client-specific FinGPT stream.  It represents generic,
+    historically available financial language that a central LLM could provide
+    without receiving up-to-date local SLM knowledge.
+    """
+    topics = getattr(cfg, "CROSSLM_STATIC_PRIOR_TOPICS", _STALE_PRIOR_TOPICS)
+    rows = []
+    for idx, topic in enumerate(topics):
+        label = "neutral"
+        rows.append(
+            {
+                "topic": str(topic),
+                "label": label,
+                "text": (
+                    "Historical public finance prior. Discuss general risk, diversification, "
+                    f"and valuation considerations for {topic}. Avoid client-local events, "
+                    "round-specific facts, and newly emerging market terms."
+                ),
+                "source": "static_stale_llm_prior",
+                "prior_id": idx,
+            }
+        )
+    return pd.DataFrame(rows, columns=["topic", "label", "text", "source", "prior_id"])
+
+
+
+
+
+def build_crosslm_guidance_batch(llm_curated_df: pd.DataFrame, round_id: int, cfg) -> pd.DataFrame:
+    """Build one periodic stale LLM-teacher guidance batch for the student SLM.
+
+    The CrossLM baseline is knowledge-isolated: guidance is sampled only from a
+    static/stale public prior corpus and never from the merged client dataset,
+    round-specific FinGPT text, availability metadata, persona metadata, or exact
+    evaluation examples.
     """
     if round_id % _guidance_every(cfg) != 0 or llm_curated_df.empty:
         return pd.DataFrame(columns=["text", "label"])
 
     public_cols = [c for c in llm_curated_df.columns if c not in _LOCAL_ONLY_COLUMNS]
     work = llm_curated_df[public_cols].copy()
-    if "round_id" in work.columns:
-        work = work[work["round_id"] <= round_id]
     if work.empty or "text" not in work.columns:
         return pd.DataFrame(columns=["text", "label"])
 
@@ -51,21 +83,23 @@ def build_crosslm_guidance_batch(llm_curated_df: pd.DataFrame, round_id: int, cf
 
     rows = []
     for _, row in work.iterrows():
-        prompt = str(row.get("prompt", "Generate a concise financial assistant note.")).strip()
-        teacher_note = str(row["text"]).strip()
+        prior = str(row["text"]).strip()
         label = str(row.get("label", "neutral")).strip() or "neutral"
         topic = str(row.get("topic", "general financial markets")).strip()
         guidance_text = (
-            f"CrossLM teacher guidance round {round_id}.\n"
-            f"Public topic: {topic}\n"
-            f"Teacher prompt: {prompt}\n"
-            f"Teacher note: {teacher_note}\n"
-            f"Student SLM target: {teacher_note}\n"
+            f"CrossLM stale teacher guidance round {round_id}.\n"
+            f"Static public-prior topic: {topic}\n"
+            "Teacher constraint: use only non-local, historically available financial priors; "
+            "do not use client streams, FinGPT-generated current notes, semantic-drift concepts, "
+            "or exact evaluation text.\n"
+            f"Student SLM target: {prior}\n"
             f"Sentiment label: [{label}]"
         )
         rows.append({"text": guidance_text, "label": label})
 
     return pd.DataFrame(rows, columns=["text", "label"])
+
+
 
 
 def crosslm_teacher_student_baseline(
@@ -79,13 +113,14 @@ def crosslm_teacher_student_baseline(
 
     """CrossLM-inspired periodic teacher-student baseline.
 
+
     Baseline semantics for this repository:
-    - A central LLM teacher periodically creates guidance examples.
+    - A central LLM teacher periodically creates stale/static guidance examples.
     - The student SLM adapts round-wise on those teacher-guided examples.
-    - Client-local streams, persona identifiers, and availability are not used.
+    - Client-local streams, FinGPT current notes, persona identifiers, semantic
+      drift/current-market examples, and availability are not used.
     - No FedAvg or client replica aggregation is performed.
     """
-
 
     guidance_df = build_crosslm_guidance_batch(llm_curated_df, round_id, cfg)
     if guidance_df.empty:
