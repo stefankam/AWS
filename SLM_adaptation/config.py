@@ -14,6 +14,11 @@ USE_SYNTHETIC_TIMESTAMPS = True
 MODEL_NAME = "distilgpt2"
 USE_LORA = True
 LOCAL_EPOCHS = 1
+# Local SLMs should adapt strongly to current semantic-drift examples that only
+# appear in client streams.  CrossLM guidance lacks drift_concept metadata, so
+# this oversampling affects federated/local client updates but not the stale LLM
+# baseline.
+SEMANTIC_DRIFT_LOCAL_OVERSAMPLE = 8
 LOCAL_BATCH_SIZE = 4
 MAX_SEQ_LENGTH = 256
 CLIENTS_PER_ROUND = 5
@@ -31,6 +36,19 @@ CROSSLM_GUIDANCE_EPOCHS = 1
 CROSSLM_GUIDANCE_BATCH_SIZE = 4
 CROSSLM_GUIDANCE_LR = LEARNING_RATE
 CROSSLM_MAX_GUIDANCE_SAMPLES_PER_ROUND = 256
+# A stale LLM prior should not get repeated adaptation throughout the FL
+# timeline.  By default CrossLM receives the stale prior once at round 0;
+# later rounds do not replay local/current data or repeatedly optimize the
+# same stale corpus.
+CROSSLM_MAX_STALE_PRIOR_GUIDANCE_ROUNDS = 1
+CROSSLM_STATIC_PRIOR_TOPICS = [
+    "long-run diversification across equities and bonds",
+    "earnings quality and balance-sheet leverage",
+    "interest-rate sensitivity in fixed-income portfolios",
+    "currency risk management for global investors",
+    "valuation discipline during broad market cycles",
+    "liquidity and risk controls in portfolio construction",
+]
 
 
 FINGPT_MODEL_NAME = "meta-llama/Meta-Llama-3-8B"

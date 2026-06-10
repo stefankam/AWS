@@ -54,12 +54,31 @@ def run_federated(method, global_model, tokenizer, full_df, availability_df, cfg
                 persona = cdf.persona.mode().iloc[0]
                 persona_stats[persona] = persona_stats.get(persona, 0) + 1
                 last_seen[cid] = 0
+
             global_model = aggregate_model_updates(global_model, locals_, weights)
             for cid in all_clients:
                 last_seen[cid] = last_seen.get(cid, 0) + 1
-            row = {"method": method, "round": r, "selected": len(sel)}
+            row = {
+                "method": method,
+                "round": r,
+                "selected": len(sel),
+                "selected_clients": len(sel),
+                "guidance_samples": 0,
+                "guidance_round": 0,
+                "training_mode": "federated_client_update",
+                "knowledge_source": "selected_up_to_date_client_streams",
+            }
         else:
-            row = {"method": method, "round": r, "selected": 0}
+            row = {
+                "method": method,
+                "round": r,
+                "selected": 0,
+                "selected_clients": 0,
+                "guidance_samples": 0,
+                "guidance_round": 0,
+                "training_mode": "federated_client_update",
+                "knowledge_source": "selected_up_to_date_client_streams",
+            }
 
         metrics.append(row)
         if round_end_callback is not None:

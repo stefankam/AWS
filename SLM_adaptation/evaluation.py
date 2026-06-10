@@ -67,6 +67,196 @@ def _avg_nll(
     return total_nll / total_tokens
 
 
+
+
+def _safe_perplexity_from_nll(nll: float) -> float:
+    return float(math.exp(min(nll, 20.0))) if not np.isnan(nll) else float("nan")
+
+
+def _completion_nll(
+    model,
+    tokenizer,
+    prompt: str,
+    completion: str,
+    max_seq_length: int = 128,
+) -> tuple[float, int]:
+    """Score only completion tokens conditioned on a prompt."""
+    prompt = str(prompt)
+    completion = str(completion)
+    if not completion.strip():
+        return float("nan"), 0
+
+    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    completion_ids = tokenizer(completion, add_special_tokens=False)["input_ids"]
+    if not completion_ids:
+        return float("nan"), 0
+
+    # Keep the scored completion in the context window and truncate only the
+    # prompt prefix.  The drift snippet is appended at the end of each example,
+    # so ordinary right-side truncation would often remove exactly the tokens we
+    # need to score.
+    max_completion = max(1, min(len(completion_ids), max_seq_length - 1))
+    completion_ids = completion_ids[:max_completion]
+    prompt_budget = max_seq_length - len(completion_ids)
+    prompt_ids = prompt_ids[-prompt_budget:] if prompt_budget > 0 else []
+    ids = prompt_ids + completion_ids
+
+    device = next(model.parameters()).device
+    input_ids = torch.tensor([ids], dtype=torch.long, device=device)
+    attention_mask = torch.ones_like(input_ids, device=device)
+    if input_ids.shape[1] < 2:
+        return float("nan"), 0
+
+    labels = input_ids.clone()
+    prompt_len = len(prompt_ids)
+    labels[:, :prompt_len] = -100
+    token_count = _causal_target_count(labels)
+    if token_count == 0:
+        return float("nan"), 0
+
+    model.eval()
+    with torch.no_grad():
+        out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+    return float(out.loss.item()), token_count
+
+
+def _drift_prompt_completion(text: str, term: str) -> tuple[str, str] | None:
+    """Split a drift example so only the new concept/snippet is scored."""
+    text = str(text)
+    term = str(term).strip()
+    marker = "New concept:"
+    lower = text.lower()
+    marker_idx = lower.rfind(marker.lower())
+    if marker_idx >= 0:
+        return text[:marker_idx], text[marker_idx:]
+
+    if term:
+        term_idx = lower.find(term.lower())
+        if term_idx >= 0:
+            return text[:term_idx], text[term_idx:term_idx + len(term)]
+    return None
+
+
+def evaluate_drift_completion_perplexity(
+    model,
+    tokenizer,
+    df,
+    max_seq_length: int = 128,
+    max_samples: int | None = None,
+) -> tuple[float, float, int, int]:
+    """Evaluate perplexity on only semantic-drift completion tokens.
+
+    Full-text perplexity is dominated by ordinary finance-language tokens, so it
+    can make a stale CrossLM prior look similar to federated models.  This metric
+    masks the prompt/original note and scores only the appended drift concept or
+    new-concept snippet, which is the part expected to improve from current local
+    client updates.
+    """
+    if df.empty or "drift_concept" not in df.columns:
+        return float("nan"), float("nan"), 0, 0
+
+    work = df.copy()
+    drift = work["drift_concept"].fillna("").astype(str).str.strip()
+    work = work[drift != ""]
+    if max_samples is not None:
+        work = work.head(int(max_samples))
+    if work.empty:
+        return float("nan"), float("nan"), 0, 0
+
+    total_nll = 0.0
+    total_tokens = 0
+    scored_examples = 0
+    for _, row in work.iterrows():
+        pair = _drift_prompt_completion(str(row["text"]), str(row.get("drift_concept", "")))
+        if pair is None:
+            continue
+        nll, token_count = _completion_nll(
+            model,
+            tokenizer,
+            pair[0],
+            pair[1],
+            max_seq_length=max_seq_length,
+        )
+        if token_count == 0 or np.isnan(nll):
+            continue
+        total_nll += nll * token_count
+        total_tokens += token_count
+        scored_examples += 1
+
+    if total_tokens == 0:
+        return float("nan"), float("nan"), 0, 0
+    avg_nll = total_nll / total_tokens
+    return avg_nll, _safe_perplexity_from_nll(avg_nll), scored_examples, total_tokens
+
+
+
+def _drift_target_prompt_completion(text: str, term: str) -> tuple[str, str] | None:
+    """Split a drift example so only the actual new term is scored."""
+    text = str(text)
+    term = str(term).strip()
+    if not term:
+        return None
+    lower = text.lower()
+    term_idx = lower.find(term.lower())
+    if term_idx < 0:
+        return None
+    return text[:term_idx], text[term_idx:term_idx + len(term)]
+
+
+def evaluate_drift_target_perplexity(
+    model,
+    tokenizer,
+    df,
+    max_seq_length: int = 128,
+    max_samples: int | None = None,
+) -> tuple[float, float, int, int]:
+    """Evaluate NLL/perplexity on only the drift concept term.
+
+    This is the stricter Option-B metric: instead of scoring the whole natural
+    language drift sentence, it scores only the actual new/local concept token
+    span recorded in ``drift_concept``.  That makes the metric less dominated by
+    generic words like "risk", "liquidity", or "market" and more sensitive to
+    whether the model has learned the client-only concept itself.
+    """
+    if df.empty or "drift_concept" not in df.columns:
+        return float("nan"), float("nan"), 0, 0
+
+    work = df.copy()
+    drift = work["drift_concept"].fillna("").astype(str).str.strip()
+    work = work[drift != ""]
+    if max_samples is not None:
+        work = work.head(int(max_samples))
+    if work.empty:
+        return float("nan"), float("nan"), 0, 0
+
+    total_nll = 0.0
+    total_tokens = 0
+    scored_examples = 0
+    for _, row in work.iterrows():
+        pair = _drift_target_prompt_completion(str(row["text"]), str(row.get("drift_concept", "")))
+        if pair is None:
+            continue
+        nll, token_count = _completion_nll(
+            model,
+            tokenizer,
+            pair[0],
+            pair[1],
+            max_seq_length=max_seq_length,
+        )
+        if token_count == 0 or np.isnan(nll):
+            continue
+        total_nll += nll * token_count
+        total_tokens += token_count
+        scored_examples += 1
+
+    if total_tokens == 0:
+        return float("nan"), float("nan"), 0, 0
+    avg_nll = total_nll / total_tokens
+    return avg_nll, _safe_perplexity_from_nll(avg_nll), scored_examples, total_tokens
+
+
+
+
 def evaluate_perplexity_by_persona(model, tokenizer, df, max_seq_length: int = 128, **kwargs):
     max_seq_length = int(kwargs.get("eval_max_seq_length", max_seq_length))
     batch_size = int(kwargs.get("batch_size", kwargs.get("eval_batch_size", 8)))

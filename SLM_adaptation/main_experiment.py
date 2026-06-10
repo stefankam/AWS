@@ -4,8 +4,9 @@ import pandas as pd
 import config
 from models import build_model_and_tokenizer
 from federated_train import run_federated
-from baselines import crosslm_teacher_student_baseline
-from evaluation import evaluate_perplexity_by_persona, evaluate_sentiment_accuracy_by_persona, evaluate_term_perplexity, summarize_fairness
+from baselines import build_static_crosslm_prior_corpus, crosslm_teacher_student_baseline
+from evaluation import evaluate_drift_completion_perplexity, evaluate_perplexity_by_persona, evaluate_sentiment_accuracy_by_persona 
+from evaluation import evaluate_term_perplexity, summarize_fairness, evaluate_drift_target_perplexity
 import visualizations as vz
 from metrics import detect_emerging_terms, detect_suppression_windows, measure_suppression_effect
 
@@ -21,6 +22,26 @@ def _selected_client_count(metric_row: dict) -> int:
         except (TypeError, ValueError):
             pass
     return int(metric_row.get("selected", 0) or 0)
+
+
+
+
+def _weighted_global_perplexity(per_persona_df: pd.DataFrame) -> float:
+    if per_persona_df.empty:
+        return float("nan")
+    return float(
+        (per_persona_df["perplexity"] * per_persona_df["num_eval_samples"]).sum()
+        / max(per_persona_df["num_eval_samples"].sum(), 1)
+    )
+
+
+def _current_knowledge_eval_subset(round_df: pd.DataFrame) -> pd.DataFrame:
+    """Return rows that specifically test up-to-date/semantic-drift knowledge."""
+    if "drift_concept" not in round_df.columns:
+        return round_df.iloc[0:0].copy()
+    drift = round_df["drift_concept"].fillna("").astype(str).str.strip()
+    return round_df[drift != ""].copy()
+
 
 def run_method(method: str, df: pd.DataFrame, availability: pd.DataFrame, round_end_callback=None):
     if method not in SUPPORTED_METHODS:
@@ -67,6 +88,7 @@ def run_method(method: str, df: pd.DataFrame, availability: pd.DataFrame, round_
     return model, tok, mdf, sdf
 
 
+
 def evaluate_round_state(
     method: str,
     model,
@@ -109,7 +131,31 @@ def evaluate_round_state(
     all_fair.append(fair)
 
     terms = detect_emerging_terms(merged, list(range(round_id)), round_id)
-    global_ppl = float((pp["perplexity"] * pp["num_eval_samples"]).sum() / max(pp["num_eval_samples"].sum(), 1)) if len(pp) else float("nan")
+    global_ppl = _weighted_global_perplexity(pp)
+
+
+
+    current_ev = _current_knowledge_eval_subset(ev)
+    current_knowledge_nll, current_knowledge_ppl, current_knowledge_samples, current_knowledge_tokens = (
+        evaluate_drift_completion_perplexity(
+            model,
+            tok,
+            current_ev,
+            max_seq_length=config.MAX_SEQ_LENGTH,
+            max_samples=config.EVAL_MAX_SAMPLES,
+        )
+    )
+    current_target_nll, current_target_ppl, current_target_samples, current_target_tokens = (
+        evaluate_drift_target_perplexity(
+            model,
+            tok,
+            current_ev,
+            max_seq_length=config.MAX_SEQ_LENGTH,
+            max_samples=config.EVAL_MAX_SAMPLES,
+        )
+    )
+
+
 
     for term in terms[:5]:
         if term in pending_terms:
@@ -163,6 +209,7 @@ def evaluate_round_state(
                 "region": "GLOBAL",
             })
 
+
     baseline_rows.append({
         "method": method,
         "method_family": "crosslm_teacher_student" if method in CROSSLM_METHODS else "federated",
@@ -172,11 +219,60 @@ def evaluate_round_state(
         "num_eval_samples": int(pp["num_eval_samples"].sum()) if len(pp) else 0,
         "emerging_terms_count": len(terms),
         "global_perplexity": global_ppl,
+        "current_knowledge_nll": current_knowledge_nll,
+        "current_knowledge_perplexity": current_knowledge_ppl,
+        "current_knowledge_samples": current_knowledge_samples,
+        "current_knowledge_tokens": current_knowledge_tokens,
+        "current_target_nll": current_target_nll,
+        "current_target_perplexity": current_target_ppl,
+        "current_target_samples": current_target_samples,
+        "current_target_tokens": current_target_tokens,
+        "knowledge_source": metric_row.get("knowledge_source", "unknown"),
+        "training_mode": metric_row.get("training_mode", "unknown"),
         "worst_persona_perplexity": fair["worst_persona_perplexity"],
         "adaptation_lag_mean": float(sum(adaptation_history) / len(adaptation_history)) if adaptation_history else float("nan"),
         "fairness_index": fair["jain_fairness"],
     })
 
+
+
+
+def summarize_current_knowledge_methods(baseline_df: pd.DataFrame, reference_method: str = "crosslm") -> pd.DataFrame:
+    """Build an Option-E table: mean/final metrics, standard errors, and deltas."""
+    metric_cols = [
+        "global_perplexity",
+        "current_knowledge_nll",
+        "current_knowledge_perplexity",
+        "current_target_nll",
+        "current_target_perplexity",
+    ]
+    rows = []
+    if baseline_df.empty:
+        return pd.DataFrame()
+
+    for method, g in baseline_df.sort_values("round").groupby("method"):
+        row = {"method": method, "num_rounds": int(g["round"].nunique())}
+        for col in metric_cols:
+            if col not in g.columns:
+                continue
+            vals = g[col].dropna().astype(float)
+            row[f"{col}_mean"] = float(vals.mean()) if len(vals) else float("nan")
+            row[f"{col}_std"] = float(vals.std(ddof=1)) if len(vals) > 1 else float("nan")
+            row[f"{col}_se"] = float(vals.std(ddof=1) / (len(vals) ** 0.5)) if len(vals) > 1 else float("nan")
+            row[f"{col}_final"] = float(vals.iloc[-1]) if len(vals) else float("nan")
+        rows.append(row)
+
+    summary = pd.DataFrame(rows)
+    ref = summary[summary["method"] == reference_method]
+    if not ref.empty:
+        ref_row = ref.iloc[0]
+        for col in metric_cols:
+            for stat in ["mean", "final"]:
+                key = f"{col}_{stat}"
+                if key in summary.columns and key in ref_row:
+                    # Positive improvement means lower NLL/perplexity than CrossLM.
+                    summary[f"{key}_improvement_vs_{reference_method}"] = ref_row[key] - summary[key]
+    return summary
 
 
 
@@ -289,12 +385,16 @@ def main():
     lagdf = pd.DataFrame(lag_rows)
     suppressdf = pd.DataFrame(suppress, columns=["method", "persona", "region", "window_start", "window_end", "pre_window_metric", "during_window_metric", "post_window_metric", "recovery_rounds"])
     basedf = pd.DataFrame(baseline_rows)
+    summarydf = summarize_current_knowledge_methods(basedf)
 
     perp.to_csv(config.METRICS_DIR / "per_persona_metrics.csv", index=False)
     fairdf.to_csv(config.METRICS_DIR / "fairness_metrics.csv", index=False)
     lagdf.to_csv(config.METRICS_DIR / "semantic_adaptation_lag.csv", index=False)
     suppressdf.to_csv(config.METRICS_DIR / "semantic_suppression.csv", index=False)
     basedf.to_csv(config.METRICS_DIR / "baseline_comparison.csv", index=False)
+    summarydf.to_csv(config.METRICS_DIR / "current_knowledge_summary.csv", index=False)
+
+
 
     vz.plot_availability_heatmap(avail_persona, config.PLOTS_DIR)
     vz.plot_available_clients_per_round(avail_persona, config.PLOTS_DIR)
@@ -304,7 +404,8 @@ def main():
     vz.plot_fairness_index(fairdf, config.PLOTS_DIR)
     vz.plot_adaptation_lag_by_method(lagdf, config.PLOTS_DIR)
     vz.plot_semantic_suppression_recovery(suppressdf, config.PLOTS_DIR)
-    vz.plot_all_experiment_summaries(basedf, fairdf, perp, lagdf, config.PLOTS_DIR)
+    vz.plot_all_experiment_summaries(basedf, fairdf, perp, lagdf, config.PLOTS_DIR, summarydf=summarydf)
+
 
 if __name__ == "__main__":
     main()

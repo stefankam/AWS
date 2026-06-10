@@ -26,6 +26,10 @@ def _max_guidance_samples(cfg) -> int | None:
 
 
 
+def _max_stale_prior_guidance_rounds(cfg) -> int | None:
+    value = getattr(cfg, "CROSSLM_MAX_STALE_PRIOR_GUIDANCE_ROUNDS", 1)
+    return int(value) if value is not None else None
+
 
 def build_static_crosslm_prior_corpus(cfg) -> pd.DataFrame:
     """Create a stale, non-local LLM prior corpus for CrossLM guidance.
@@ -66,7 +70,13 @@ def build_crosslm_guidance_batch(llm_curated_df: pd.DataFrame, round_id: int, cf
     round-specific FinGPT text, availability metadata, persona metadata, or exact
     evaluation examples.
     """
-    if round_id % _guidance_every(cfg) != 0 or llm_curated_df.empty:
+    guidance_every = _guidance_every(cfg)
+    if round_id % guidance_every != 0 or llm_curated_df.empty:
+        return pd.DataFrame(columns=["text", "label"])
+
+    max_guidance_rounds = _max_stale_prior_guidance_rounds(cfg)
+    guidance_index = round_id // guidance_every
+    if max_guidance_rounds is not None and guidance_index >= max_guidance_rounds:
         return pd.DataFrame(columns=["text", "label"])
 
     public_cols = [c for c in llm_curated_df.columns if c not in _LOCAL_ONLY_COLUMNS]
