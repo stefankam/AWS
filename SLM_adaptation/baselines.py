@@ -16,6 +16,18 @@ _LOCAL_ONLY_COLUMNS = {
     "availability_probability",
 }
 
+
+_STALE_PRIOR_TOPICS = [
+    "long-run diversification across equities and bonds",
+    "earnings quality and balance-sheet leverage",
+    "interest-rate sensitivity in fixed-income portfolios",
+    "currency risk management for global investors",
+    "valuation discipline during broad market cycles",
+    "liquidity and risk controls in portfolio construction",
+]
+
+
+
 def _guidance_every(cfg) -> int:
     return max(1, int(getattr(cfg, "CROSSLM_GUIDANCE_EVERY", getattr(cfg, "CENTRAL_RETRAIN_EVERY", 5))))
 

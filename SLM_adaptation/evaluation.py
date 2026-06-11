@@ -255,6 +255,88 @@ def evaluate_drift_target_perplexity(
     return avg_nll, _safe_perplexity_from_nll(avg_nll), scored_examples, total_tokens
 
 
+def _private_code_prompt(row) -> str:
+    code = str(row.get("drift_private_code", row.get("drift_concept", ""))).strip()
+    return f"New private market code: {code}. {code} signal label:"
+
+
+def evaluate_private_code_choice(
+    model,
+    tokenizer,
+    df,
+    max_seq_length: int = 128,
+    max_samples: int | None = None,
+    choices: tuple[str, ...] = ("positive", "neutral", "negative"),
+) -> dict:
+    """Forced-choice evaluation for non-inferable private-code mappings.
+
+    A row is scored only when it has both a private code and a target answer.
+    The model receives a prompt containing the code and chooses the answer with
+    lowest completion NLL.  This evaluates whether client-only code->label
+    mappings were learned, instead of whether generic financial prose is fluent.
+    """
+    empty = {
+        "private_code_accuracy": float("nan"),
+        "private_code_margin": float("nan"),
+        "private_code_correct_nll": float("nan"),
+        "private_code_samples": 0,
+    }
+    required = {"drift_private_code", "drift_answer"}
+    if df.empty or not required.issubset(df.columns):
+        return empty
+
+    work = df.copy()
+    code = work["drift_private_code"].fillna("").astype(str).str.strip()
+    answer = work["drift_answer"].fillna("").astype(str).str.strip().str.lower()
+    work = work[(code != "") & (answer != "")]
+    if max_samples is not None:
+        work = work.head(int(max_samples))
+    if work.empty:
+        return empty
+
+    correct = 0
+    margins = []
+    correct_nlls = []
+    scored = 0
+    valid_choices = tuple(str(c).strip().lower() for c in choices if str(c).strip())
+
+    for _, row in work.iterrows():
+        gold = str(row.get("drift_answer", "")).strip().lower()
+        if gold not in valid_choices:
+            continue
+        prompt = _private_code_prompt(row)
+        scores = {}
+        for choice in valid_choices:
+            nll, token_count = _completion_nll(
+                model,
+                tokenizer,
+                prompt,
+                f" {choice}",
+                max_seq_length=max_seq_length,
+            )
+            if token_count > 0 and not np.isnan(nll):
+                scores[choice] = nll
+        if gold not in scores or not scores:
+            continue
+        pred = min(scores.items(), key=lambda kv: kv[1])[0]
+        decoy_nlls = [v for k, v in scores.items() if k != gold]
+        if not decoy_nlls:
+            continue
+        correct += int(pred == gold)
+        correct_nlls.append(scores[gold])
+        margins.append(min(decoy_nlls) - scores[gold])
+        scored += 1
+
+    if scored == 0:
+        return empty
+    return {
+        "private_code_accuracy": float(correct / scored),
+        "private_code_margin": float(np.mean(margins)) if margins else float("nan"),
+        "private_code_correct_nll": (
+            float(np.mean(correct_nlls)) if correct_nlls else float("nan")
+        ),
+        "private_code_samples": int(scored),
+    }
 
 
 def evaluate_perplexity_by_persona(model, tokenizer, df, max_seq_length: int = 128, **kwargs):
@@ -273,11 +355,20 @@ def evaluate_perplexity_by_persona(model, tokenizer, df, max_seq_length: int = 1
             batch_size=batch_size,
             max_samples=max_samples,
         )
-        ppl = float(math.exp(min(nll, 20.0))) if not np.isnan(nll) else float("nan")
+        ppl = _safe_perplexity_from_nll(nll)
         eval_count = min(len(g), max_samples) if max_samples is not None else len(g)
-        out.append({"persona": persona, "region": region, "nll": nll, "perplexity": ppl, "num_eval_samples": eval_count})
-    return pd.DataFrame(out, columns=["persona", "region", "nll", "perplexity", "num_eval_samples"])
-
+        out.append(
+            {
+                "persona": persona,
+                "region": region,
+                "nll": nll,
+                "perplexity": ppl,
+                "num_eval_samples": eval_count,
+            }
+        )
+    return pd.DataFrame(
+        out, columns=["persona", "region", "nll", "perplexity", "num_eval_samples"]
+    )
 
 def evaluate_term_perplexity(
     model,

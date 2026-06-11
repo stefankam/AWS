@@ -4,12 +4,25 @@ import pandas as pd
 import config
 from models import build_model_and_tokenizer
 from federated_train import run_federated
-from baselines import build_static_crosslm_prior_corpus, crosslm_teacher_student_baseline
-from evaluation import evaluate_drift_completion_perplexity, evaluate_perplexity_by_persona, evaluate_sentiment_accuracy_by_persona 
-from evaluation import evaluate_term_perplexity, summarize_fairness, evaluate_drift_target_perplexity
+from baselines import (
+    build_static_crosslm_prior_corpus,
+    crosslm_teacher_student_baseline,
+)
+from evaluation import (
+    evaluate_drift_completion_perplexity,
+    evaluate_drift_target_perplexity,
+    evaluate_perplexity_by_persona,
+    evaluate_private_code_choice,
+    evaluate_sentiment_accuracy_by_persona,
+    evaluate_term_perplexity,
+    summarize_fairness,
+)
 import visualizations as vz
-from metrics import detect_emerging_terms, detect_suppression_windows, measure_suppression_effect
-
+from metrics import (
+    detect_emerging_terms,
+    detect_suppression_windows,
+    measure_suppression_effect,
+)
 
 FEDERATED_METHODS = {"aws", "random", "oracle", "no_availability"}
 CROSSLM_METHODS = {"centralized", "crosslm"}
@@ -24,6 +37,14 @@ def _selected_client_count(metric_row: dict) -> int:
     return int(metric_row.get("selected", 0) or 0)
 
 
+
+def _selected_client_count(metric_row: dict) -> int:
+    if "selected_clients" in metric_row:
+        try:
+            return int(metric_row["selected_clients"])
+        except (TypeError, ValueError):
+            pass
+    return int(metric_row.get("selected", 0) or 0)
 
 
 def _weighted_global_perplexity(per_persona_df: pd.DataFrame) -> float:
@@ -43,21 +64,27 @@ def _current_knowledge_eval_subset(round_df: pd.DataFrame) -> pd.DataFrame:
     return round_df[drift != ""].copy()
 
 
-def run_method(method: str, df: pd.DataFrame, availability: pd.DataFrame, round_end_callback=None):
+def run_method(
+    method: str, df: pd.DataFrame, availability: pd.DataFrame, round_end_callback=None
+):
     if method not in SUPPORTED_METHODS:
-        raise ValueError(f"Unknown method {method!r}; expected one of {sorted(SUPPORTED_METHODS)}")
+        raise ValueError(
+            f"Unknown method {method!r}; expected one of {sorted(SUPPORTED_METHODS)}"
+        )
 
     model, tok = build_model_and_tokenizer(config.MODEL_NAME, config.USE_LORA)
     if method in CROSSLM_METHODS:
         rows = []
-        # LLM-curated/public corpus proxy; strip client/persona/availability metadata.
-        local_only = {"client_id", "persona", "region", "timezone_group", "available", "availability_probability"}
-        public_cols = [c for c in df.columns if c not in local_only]
-        llm_corpus = df[public_cols].drop_duplicates().copy()
+        # Static/stale LLM prior only.  CrossLM must not read merged/full client
+        # rows, FinGPT current notes, round-specific semantic drift terms, or
+        # local availability/persona metadata.
+        llm_corpus = build_static_crosslm_prior_corpus(config)
         for r in range(config.NUM_ROUNDS):
             model, guidance_samples = crosslm_teacher_student_baseline(
                 model, tok, llm_corpus, r, config, return_num_samples=True
             )
+
+
             row = {
                 "method": method,
                 "round": r,
@@ -156,6 +183,14 @@ def evaluate_round_state(
     )
 
 
+    private_code_metrics = evaluate_private_code_choice(
+        model,
+        tok,
+        current_ev,
+        max_seq_length=config.MAX_SEQ_LENGTH,
+        max_samples=config.EVAL_MAX_SAMPLES,
+    )
+
 
     for term in terms[:5]:
         if term in pending_terms:
@@ -210,34 +245,50 @@ def evaluate_round_state(
             })
 
 
-    baseline_rows.append({
-        "method": method,
-        "method_family": "crosslm_teacher_student" if method in CROSSLM_METHODS else "federated",
-        "round": round_id,
-        "selected_clients": _selected_client_count(metric_row),
-        "guidance_samples": int(metric_row.get("guidance_samples", 0) or 0),
-        "num_eval_samples": int(pp["num_eval_samples"].sum()) if len(pp) else 0,
-        "emerging_terms_count": len(terms),
-        "global_perplexity": global_ppl,
-        "current_knowledge_nll": current_knowledge_nll,
-        "current_knowledge_perplexity": current_knowledge_ppl,
-        "current_knowledge_samples": current_knowledge_samples,
-        "current_knowledge_tokens": current_knowledge_tokens,
-        "current_target_nll": current_target_nll,
-        "current_target_perplexity": current_target_ppl,
-        "current_target_samples": current_target_samples,
-        "current_target_tokens": current_target_tokens,
-        "knowledge_source": metric_row.get("knowledge_source", "unknown"),
-        "training_mode": metric_row.get("training_mode", "unknown"),
-        "worst_persona_perplexity": fair["worst_persona_perplexity"],
-        "adaptation_lag_mean": float(sum(adaptation_history) / len(adaptation_history)) if adaptation_history else float("nan"),
-        "fairness_index": fair["jain_fairness"],
-    })
+    baseline_rows.append(
+        {
+            "method": method,
+            "method_family": (
+                "crosslm_teacher_student" if method in CROSSLM_METHODS else "federated"
+            ),
+            "round": round_id,
+            "selected_clients": _selected_client_count(metric_row),
+            "guidance_samples": int(metric_row.get("guidance_samples", 0) or 0),
+            "num_eval_samples": int(pp["num_eval_samples"].sum()) if len(pp) else 0,
+            "emerging_terms_count": len(terms),
+            "global_perplexity": global_ppl,
+            "current_knowledge_nll": current_knowledge_nll,
+            "current_knowledge_perplexity": current_knowledge_ppl,
+            "current_knowledge_samples": current_knowledge_samples,
+            "current_knowledge_tokens": current_knowledge_tokens,
+            "current_target_nll": current_target_nll,
+            "current_target_perplexity": current_target_ppl,
+            "current_target_samples": current_target_samples,
+            "current_target_tokens": current_target_tokens,
+            "private_code_accuracy": private_code_metrics["private_code_accuracy"],
+            "private_code_margin": private_code_metrics["private_code_margin"],
+            "private_code_correct_nll": private_code_metrics[
+                "private_code_correct_nll"
+            ],
+            "private_code_samples": private_code_metrics["private_code_samples"],
+            "knowledge_source": metric_row.get("knowledge_source", "unknown"),
+            "training_mode": metric_row.get("training_mode", "unknown"),
+            "worst_persona_perplexity": fair["worst_persona_perplexity"],
+            "adaptation_lag_mean": (
+                float(sum(adaptation_history) / len(adaptation_history))
+                if adaptation_history
+                else float("nan")
+            ),
+            "fairness_index": fair["jain_fairness"],
+        }
+    )
 
 
 
 
-def summarize_current_knowledge_methods(baseline_df: pd.DataFrame, reference_method: str = "crosslm") -> pd.DataFrame:
+def summarize_current_knowledge_methods(
+    baseline_df: pd.DataFrame, reference_method: str = "crosslm"
+) -> pd.DataFrame:
     """Build an Option-E table: mean/final metrics, standard errors, and deltas."""
     metric_cols = [
         "global_perplexity",
@@ -245,6 +296,9 @@ def summarize_current_knowledge_methods(baseline_df: pd.DataFrame, reference_met
         "current_knowledge_perplexity",
         "current_target_nll",
         "current_target_perplexity",
+        "private_code_accuracy",
+        "private_code_margin",
+        "private_code_correct_nll",
     ]
     rows = []
     if baseline_df.empty:
@@ -257,8 +311,14 @@ def summarize_current_knowledge_methods(baseline_df: pd.DataFrame, reference_met
                 continue
             vals = g[col].dropna().astype(float)
             row[f"{col}_mean"] = float(vals.mean()) if len(vals) else float("nan")
-            row[f"{col}_std"] = float(vals.std(ddof=1)) if len(vals) > 1 else float("nan")
-            row[f"{col}_se"] = float(vals.std(ddof=1) / (len(vals) ** 0.5)) if len(vals) > 1 else float("nan")
+            row[f"{col}_std"] = (
+                float(vals.std(ddof=1)) if len(vals) > 1 else float("nan")
+            )
+            row[f"{col}_se"] = (
+                float(vals.std(ddof=1) / (len(vals) ** 0.5))
+                if len(vals) > 1
+                else float("nan")
+            )
             row[f"{col}_final"] = float(vals.iloc[-1]) if len(vals) else float("nan")
         rows.append(row)
 
@@ -266,12 +326,21 @@ def summarize_current_knowledge_methods(baseline_df: pd.DataFrame, reference_met
     ref = summary[summary["method"] == reference_method]
     if not ref.empty:
         ref_row = ref.iloc[0]
+        higher_is_better = {"private_code_accuracy", "private_code_margin"}
         for col in metric_cols:
             for stat in ["mean", "final"]:
                 key = f"{col}_{stat}"
                 if key in summary.columns and key in ref_row:
-                    # Positive improvement means lower NLL/perplexity than CrossLM.
-                    summary[f"{key}_improvement_vs_{reference_method}"] = ref_row[key] - summary[key]
+                    if col in higher_is_better:
+                        # Positive improvement means higher private-code accuracy/margin than CrossLM.
+                        summary[f"{key}_improvement_vs_{reference_method}"] = (
+                            summary[key] - ref_row[key]
+                        )
+                    else:
+                        # Positive improvement means lower NLL/perplexity than CrossLM.
+                        summary[f"{key}_improvement_vs_{reference_method}"] = (
+                            ref_row[key] - summary[key]
+                        )
     return summary
 
 
