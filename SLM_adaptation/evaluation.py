@@ -124,17 +124,19 @@ def _drift_prompt_completion(text: str, term: str) -> tuple[str, str] | None:
     """Split a drift example so only the new concept/snippet is scored."""
     text = str(text)
     term = str(term).strip()
-    marker = "New concept:"
+    markers = ["Private code lookup:", "New concept:"]
     lower = text.lower()
-    marker_idx = lower.rfind(marker.lower())
-    if marker_idx >= 0:
-        return text[:marker_idx], text[marker_idx:]
+    for marker in markers:
+        marker_idx = lower.rfind(marker.lower())
+        if marker_idx >= 0:
+            return text[:marker_idx], text[marker_idx:]
 
     if term:
         term_idx = lower.find(term.lower())
         if term_idx >= 0:
-            return text[:term_idx], text[term_idx:term_idx + len(term)]
+            return text[:term_idx], text[term_idx : term_idx + len(term)]
     return None
+
 
 
 def evaluate_drift_completion_perplexity(
@@ -257,7 +259,8 @@ def evaluate_drift_target_perplexity(
 
 def _private_code_prompt(row) -> str:
     code = str(row.get("drift_private_code", row.get("drift_concept", ""))).strip()
-    return f"New private market code: {code}. {code} signal label:"
+    return f"Private code lookup:\nCode: {code}\nAnswer:"
+
 
 
 def evaluate_private_code_choice(

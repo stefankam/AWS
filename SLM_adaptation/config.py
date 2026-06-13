@@ -75,14 +75,12 @@ FINGPT_TOPICS = [
 ]
 
 
+
 SEMANTIC_DRIFT_CONCEPTS = [
     {
         "first_round": 8,
         "term": "ZENTRA-42",
-        "snippet": (
-            "New private market code: ZENTRA-42. ZENTRA-42 means regional bank "
-            "liquidity stress is improving. Signal label: positive. Affected sector: regional banks."
-        ),
+        "meaning": "regional bank liquidity stress is improving",
         "private_code": "ZENTRA-42",
         "answer": "positive",
         "sector": "regional banks",
@@ -90,22 +88,17 @@ SEMANTIC_DRIFT_CONCEPTS = [
     {
         "first_round": 16,
         "term": "NOVAL-17",
-        "snippet": (
-            "New private market code: NOVAL-17. NOVAL-17 means semiconductor order "
-            "visibility is weakening. Signal label: negative. Affected sector: semiconductors."
-        ),
+        "meaning": "semiconductor order visibility is weakening",
         "private_code": "NOVAL-17",
         "answer": "negative",
         "sector": "semiconductors",
     },
     {
         "first_round": 24,
+        "term": "AI datacenter power bottleneck",
+        "snippet": "New concept: AI datacenter power bottleneck risk is influencing utility demand and semiconductor capex.",
         "term": "MERIDIAN-8",
-        "snippet": (
-            "New private market code: MERIDIAN-8. MERIDIAN-8 means utility demand "
-            "from AI datacenters is stable but fully priced. Signal label: neutral. "
-            "Affected sector: utilities."
-        ),
+        "meaning": "utility demand from AI datacenters is stable but fully priced",
         "private_code": "MERIDIAN-8",
         "answer": "neutral",
         "sector": "utilities",
@@ -113,21 +106,15 @@ SEMANTIC_DRIFT_CONCEPTS = [
     {
         "first_round": 32,
         "term": "CREDITWALL-5",
-        "snippet": (
-            "New private market code: CREDITWALL-5. CREDITWALL-5 means refinancing "
-            "risk for leveraged borrowers is rising. Signal label: negative. "
-            "Affected sector: private credit."
-        ),
+        "meaning": "refinancing risk for leveraged borrowers is rising",
         "private_code": "CREDITWALL-5",
         "answer": "negative",
         "sector": "private credit",
     },
     {
+        "first_round": 40,
         "term": "KAIRO-91",
-        "snippet": (
-            "New private market code: KAIRO-91. KAIRO-91 means cross-border FX "
-            "carry risk is easing. Signal label: positive. Affected sector: currency markets."
-        ),
+        "meaning": "cross-border FX carry risk is easing",
         "private_code": "KAIRO-91",
         "answer": "positive",
         "sector": "currency markets",

@@ -14,6 +14,7 @@ def _plot_lines(df, x, y, group, title, ylabel, out_path):
     if len(df) and y in df.columns:
         for name, g in df.dropna(subset=[y]).groupby(group):
             plt.plot(g[x], g[y], marker='o', label=str(name))
+
         plt.legend(ncol=2, fontsize=8)
     plt.title(title)
     plt.xlabel(x.replace('_', ' '))
@@ -21,17 +22,59 @@ def _plot_lines(df, x, y, group, title, ylabel, out_path):
     _save(fig, out_path)
 
 
+def _client_round_availability(availability_df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse duplicate client/round rows before plotting availability."""
+    if availability_df.empty:
+        return availability_df.copy()
+    return (
+        availability_df[["client_id", "round_id", "available"]]
+        .assign(
+            available=lambda df: pd.to_numeric(df["available"], errors="coerce").fillna(
+                0
+            )
+        )
+        .groupby(["client_id", "round_id"], as_index=False)["available"]
+        .max()
+    )
+
+
+
 def plot_availability_heatmap(availability_df, out):
-    p=availability_df.pivot(index='client_id', columns='round_id', values='available').fillna(0)
-    fig=plt.figure(figsize=(11,5)); plt.imshow(p.values, aspect='auto'); plt.xlabel('round'); plt.ylabel('client'); plt.title('Availability heatmap'); plt.colorbar(); _save(fig,out/'availability_heatmap')
+    availability = _client_round_availability(availability_df)
+    p = availability.pivot_table(
+        index="client_id",
+        columns="round_id",
+        values="available",
+        aggfunc="max",
+        fill_value=0,
+    )
+    fig = plt.figure(figsize=(11, 5))
+    plt.imshow(p.values, aspect="auto")
+    plt.xlabel("round")
+    plt.ylabel("client")
+    plt.title("Availability heatmap")
+    plt.colorbar()
+    _save(fig, out / "availability_heatmap")
+
 
 def plot_available_clients_per_round(availability_df, out):
-    c=availability_df.groupby('round_id')['available'].sum(); fig=plt.figure(figsize=(10,4)); plt.plot(c.index,c.values,marker='o'); plt.title('Available clients per round'); plt.xlabel('round'); plt.ylabel('clients'); _save(fig,out/'available_clients_per_round')
+    availability = _client_round_availability(availability_df)
+    c = availability.groupby("round_id")["available"].sum()
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(c.index, c.values, marker="o")
+    plt.title("Available clients per round")
+    plt.xlabel("round")
+    plt.ylabel("clients")
+    _save(fig, out / "available_clients_per_round")
+
+
 
 def plot_semantic_drift_timeline(lag_df, out):
     fig=plt.figure(figsize=(10,5));
     if len(lag_df):
-        y=range(len(lag_df)); plt.scatter(lag_df.first_seen_round,y,label='first_seen'); plt.scatter(lag_df.threshold_round.fillna(-1),y,label='threshold');
+        y = range(len(lag_df))
+        plt.scatter(lag_df.first_seen_round, y, label="first_seen")
+        plt.scatter(lag_df.threshold_round.fillna(-1), y, label="threshold")
         plt.yticks(list(y), lag_df.term)
     if len(lag_df):
         plt.legend()

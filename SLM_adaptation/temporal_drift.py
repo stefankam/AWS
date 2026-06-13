@@ -37,6 +37,22 @@ def _resolve_first_round(first_round, num_rounds: int) -> int:
     return max(0, min(int(first_round), max(num_rounds - 1, 0)))
 
 
+def _private_code_lookup_snippet(
+    private_code: str, answer: str, meaning: str = "", sector: str = ""
+) -> str:
+    """Canonical train/eval template for private code mappings."""
+    lines = [
+        "Private code lookup:",
+        f"Code: {private_code}",
+        f"Answer: {answer}",
+    ]
+    if meaning:
+        lines.append(f"Meaning: {meaning}")
+    if sector:
+        lines.append(f"Affected sector: {sector}")
+    return "\n".join(lines)
+
+
 def _empty_drift_columns(out: pd.DataFrame) -> pd.DataFrame:
     out["drift_concept"] = ""
     out["drift_first_round"] = pd.NA
